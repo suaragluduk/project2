@@ -4,14 +4,18 @@ require 'header.php';
 
 $id = $_GET['id'] ?? 0;
 $userRole = $_SESSION['role'] ?? 'karyawan';
+$userName = $_SESSION['username'] ?? 'Sistem'; // Ambil username yang login
 
 $stmt = $pdo->prepare("SELECT * FROM projects WHERE id = ?");
 $stmt->execute([$id]);
 $project = $stmt->fetch();
 
-if (!$project) { echo "<div class='alert alert-danger'>Project not found</div>"; exit; }
+if (!$project) { echo "<div class='alert alert-danger'>Project not found</div>"; require 'footer.php'; exit; }
 
-// --- LOGIC SAVE ---
+$success_msg = '';
+$error_msg = '';
+
+// --- LOGIC SAVE BULK (ADD NEW COST) ---
 if (isset($_POST['save_bulk_costs'])) {
     if(isset($_POST['selected_params']) && is_array($_POST['selected_params'])){
         $pdo->beginTransaction();
@@ -24,43 +28,77 @@ if (isset($_POST['save_bulk_costs'])) {
                 $dynamic_data_clean = [];
                 
                 foreach($dynamic_data_raw as $key => $value) {
-                    // Bersihkan titik jika angka
                     if(preg_match('/^[0-9\.]+$/', $value)){
                         $dynamic_data_clean[$key] = str_replace('.', '', $value);
                     } else {
-                        $dynamic_data_clean[$key] = $value; 
+                        // Title Case untuk teks biasa
+                        $dynamic_data_clean[$key] = ucwords(strtolower(trim($value))); 
                     }
                 }
                 
                 $json_values = json_encode($dynamic_data_clean);
 
-                $sql = "INSERT INTO project_costs (project_id, parameter_id, dynamic_values, total_cost) VALUES (?, ?, ?, ?)";
+                // INSERT dengan mencatat created_by_user
+                $sql = "INSERT INTO project_costs (project_id, parameter_id, dynamic_values, total_cost, created_by_user) VALUES (?, ?, ?, ?, ?)";
                 $stmtCost = $pdo->prepare($sql);
-                $stmtCost->execute([$id, $param_id, $json_values, $manual_total]);
+                $stmtCost->execute([$id, $param_id, $json_values, $manual_total, $userName]);
             }
             $pdo->commit();
-            echo "<div class='alert alert-success alert-dismissible fade show'><i class='fas fa-check-circle'></i> Saved! <button class='btn-close' data-bs-dismiss='alert'></button></div>";
+            $success_msg = "Data biaya berhasil ditambahkan!";
         } catch(Exception $e) {
             $pdo->rollBack();
-            echo "<div class='alert alert-danger'>Error: " . $e->getMessage() . "</div>";
+            $error_msg = "Error: " . $e->getMessage();
         }
     } else {
-        echo "<div class='alert alert-warning'>Pilih minimal satu item.</div>";
+        $error_msg = "Pilih minimal satu item untuk disimpan.";
+    }
+}
+
+// --- LOGIC UPDATE (EDIT SATUAN DARI TABEL) ---
+if (isset($_POST['update_cost'])) {
+    $cost_id = $_POST['cost_id'];
+    $raw_total = $_POST['edit_total_cost'] ?? 0;
+    $manual_total = floatval(str_replace('.', '', $raw_total));
+    
+    $dynamic_data_raw = $_POST['edit_items'] ?? [];
+    $dynamic_data_clean = [];
+    
+    foreach($dynamic_data_raw as $key => $value) {
+        if(preg_match('/^[0-9\.]+$/', $value)){
+            $dynamic_data_clean[$key] = str_replace('.', '', $value);
+        } else {
+            $dynamic_data_clean[$key] = ucwords(strtolower(trim($value))); 
+        }
+    }
+    
+    $json_values = json_encode($dynamic_data_clean);
+
+    try {
+        // UPDATE dengan mencatat updated_by_user dan updated_at
+        $stmtUpdate = $pdo->prepare("UPDATE project_costs SET dynamic_values = ?, total_cost = ?, updated_by_user = ?, updated_at = NOW() WHERE id = ?");
+        $stmtUpdate->execute([$json_values, $manual_total, $userName, $cost_id]);
+        $success_msg = "Data biaya berhasil diupdate!";
+    } catch(Exception $e) {
+        $error_msg = "Gagal update: " . $e->getMessage();
     }
 }
 
 // --- LOGIC DELETE ---
 if(isset($_GET['del_cost'])){
-    // Validasi: User hanya boleh hapus cost yang dia punya akses lihat
     $stmt = $pdo->prepare("DELETE FROM project_costs WHERE id = ?");
     $stmt->execute([$_GET['del_cost']]);
-    echo "<script>window.location='project_view.php?id=$id';</script>";
+    header("Location: project_view.php?id=$id&status=deleted");
+    exit;
 }
 
-// --- FILTER LOGIC ---
+if(isset($_GET['status']) && $_GET['status'] == 'deleted') {
+    $success_msg = "Data biaya berhasil dihapus!";
+}
+
+// --- FILTER LOGIC & AMBIL DATA ---
 $roleFilter = ($userRole === 'admin') ? "1=1" : "cg.created_by_role = 'karyawan'";
 
-// Data List (FILTERED)
+// Select data biaya termasuk field audit
 $sql = "SELECT pc.*, cp.parameter_name, cg.group_name, cg.created_by_role 
         FROM project_costs pc 
         JOIN cost_parameters cp ON pc.parameter_id = cp.id 
@@ -72,7 +110,6 @@ $costs = $pdo->prepare($sql);
 $costs->execute([$id]);
 $costList = $costs->fetchAll();
 
-// Groups Dropdown (FILTERED)
 if($userRole === 'admin') {
     $groups = $pdo->query("SELECT * FROM cost_groups ORDER BY group_name ASC")->fetchAll();
 } else {
@@ -82,9 +119,23 @@ if($userRole === 'admin') {
 
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h3><?= htmlspecialchars($project['project_name']) ?></h3>
-    <a href="dashboard.php" class="btn btn-outline-secondary btn-sm"><i class="fas fa-arrow-left"></i> Back</a>
+    <a href="dashboard.php" class="btn btn-outline-secondary btn-sm"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
 </div>
 <hr>
+
+<?php if($success_msg): ?>
+    <div class="alert alert-success alert-dismissible fade show">
+        <i class="fas fa-check-circle"></i> <?= $success_msg ?>
+        <button class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+<?php endif; ?>
+
+<?php if($error_msg): ?>
+    <div class="alert alert-danger alert-dismissible fade show">
+        <i class="fas fa-exclamation-triangle"></i> <?= $error_msg ?>
+        <button class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+<?php endif; ?>
 
 <div class="card mb-5 shadow-sm border-primary">
     <div class="card-header bg-primary text-white">
@@ -108,44 +159,188 @@ if($userRole === 'admin') {
             <div id="loading_indicator" class="text-center d-none py-3"><div class="spinner-border text-primary"></div></div>
             <div id="error_area"></div>
             <div id="dynamic_table_container"></div>
-            <button type="submit" name="save_bulk_costs" id="btn_save" class="btn btn-success w-100 mt-3 d-none">Simpan Semua</button>
+            <button type="submit" name="save_bulk_costs" id="btn_save" class="btn btn-success w-100 mt-3 d-none"><i class="fas fa-save"></i> Simpan Terpilih</button>
         </form>
     </div>
 </div>
 
 <div class="table-responsive">
-    <table class="table table-bordered table-striped">
+    <table class="table table-bordered table-striped align-middle">
         <thead class="table-dark">
-            <tr><th>Group & Parameter</th><th>Detail</th><th class="text-end">Total</th><th>Action</th></tr>
+            <tr><th>Group & Parameter</th><th>Detail Input</th><th class="text-end">Total Cost</th><th class="text-center" width="120">Action</th></tr>
         </thead>
         <tbody>
             <?php $grandTotal = 0; foreach($costList as $c): $grandTotal += $c['total_cost']; $vals = json_decode($c['dynamic_values'], true); ?>
             <tr>
                 <td>
                     <strong><?= htmlspecialchars($c['parameter_name']) ?></strong><br>
-                    <small><?= $c['group_name'] ?></small>
-                    <?php if($userRole === 'admin'): ?>
-                        <span class="badge bg-secondary ms-1" style="font-size: 0.6em"><?= $c['created_by_role'] ?></span>
-                    <?php endif; ?>
+                    <small class="text-muted"><?= $c['group_name'] ?></small>
+
+                    <div class="mt-2">
+                        <small class="text-info fw-bold d-block" style="font-size: 0.75rem;">
+                            <i class="fas fa-user-plus"></i> Diinput oleh: <?= htmlspecialchars($c['created_by_user'] ?? 'Sistem') ?> 
+                            | <?= $c['created_at'] ? date('d M Y, H:i', strtotime($c['created_at'])) : '-' ?>
+                        </small>
+                        <?php if(!empty($c['updated_by_user'])): ?>
+                        <small class="text-warning fw-bold d-block mt-1" style="font-size: 0.75rem;">
+                            <i class="fas fa-user-edit"></i> Terakhir diedit: <?= htmlspecialchars($c['updated_by_user']) ?> 
+                            | <?= $c['updated_at'] ? date('d M Y, H:i', strtotime($c['updated_at'])) : '-' ?>
+                        </small>
+                        <?php endif; ?>
+                    </div>
                 </td>
                 <td>
                     <ul class="mb-0 small text-muted ps-3">
                     <?php if($vals) foreach($vals as $k=>$v): 
                         $display = is_numeric(str_replace('.','',$v)) ? number_format((float)str_replace('.','',$v), 0, ',', '.') : $v;
-                        if($v!=='') echo "<li>$k: <strong>$display</strong></li>"; 
+                        if($v!=='') echo "<li>$k: <strong class='text-dark'>$display</strong></li>"; 
                     endforeach; ?>
                     </ul>
                 </td>
-                <td class="text-end fw-bold"><?= formatRupiah($c['total_cost']) ?></td>
-                <td class="text-center"><a href="project_view.php?id=<?= $id ?>&del_cost=<?= $c['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Hapus?')">X</a></td>
+                <td class="text-end fw-bold text-danger"><?= formatRupiah($c['total_cost']) ?></td>
+                <td class="text-center">
+                    <button type="button" class="btn btn-sm btn-warning text-dark me-1" data-bs-toggle="modal" data-bs-target="#editModal<?= $c['id'] ?>" title="Edit">
+                        <i class="fas fa-edit"></i>
+                    </button>
+                    <a href="project_view.php?id=<?= $id ?>&del_cost=<?= $c['id'] ?>" class="btn btn-sm btn-outline-danger" onclick="return confirm('Hapus?')" title="Hapus"><i class="fas fa-trash"></i></a>
+                </td>
             </tr>
+
+            <?php 
+                // Ambil struktur fields untuk parameter ini
+                $stmtF = $pdo->prepare("SELECT * FROM parameter_fields WHERE parameter_id = ? ORDER BY id ASC");
+                $stmtF->execute([$c['parameter_id']]);
+                $fields = $stmtF->fetchAll();
+            ?>
+            <div class="modal fade" id="editModal<?= $c['id'] ?>" tabindex="-1">
+              <div class="modal-dialog modal-lg">
+                <form method="POST">
+                <div class="modal-content border-warning">
+                  <div class="modal-header bg-warning text-dark">
+                    <h5 class="modal-title"><i class="fas fa-edit"></i> Edit: <?= htmlspecialchars($c['parameter_name']) ?></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body bg-light">
+                    <input type="hidden" name="cost_id" value="<?= $c['id'] ?>">
+                    <div class="row g-3">
+                        <?php foreach($fields as $f): 
+                            $val = $vals[$f['field_label']] ?? '';
+                            $isNumeric = ($f['field_type'] == 'number');
+                            $displayVal = ($isNumeric && $val !== '') ? number_format((float)str_replace('.','',$val), 0, ',', '.') : $val;
+                            
+                            $roleClass = '';
+                            if($isNumeric) {
+                                if($f['field_role'] === 'multiplier') $roleClass = 'edit-calc-multiplier border-danger';
+                                else if($f['field_role'] === 'price') $roleClass = 'edit-calc-price border-success';
+                                else if($f['field_role'] === 'extra') $roleClass = 'edit-calc-extra border-info';
+                            }
+                            $keyupEvent = $isNumeric ? "formatRupiahEdit(this, {$c['id']})" : "triggerCalcEdit({$c['id']})";
+                            $inputId = "edit-input-{$c['id']}-" . md5($f['field_label']);
+                        ?>
+                            
+                            <?php if($f['field_role'] === 'extra'): 
+                                $isChecked = ($val !== '' && (float)str_replace('.','',$val) > 0) ? 'checked' : '';
+                                $isDisabled = $isChecked ? '' : 'disabled';
+                            ?>
+                                <div class="col-md-6">
+                                    <label class="form-label small fw-bold text-info mb-0"><?= $f['field_label'] ?></label>
+                                    <div class="input-group input-group-sm">
+                                        <div class="input-group-text">
+                                            <input class="form-check-input mt-0" type="checkbox" id="check-<?= $inputId ?>" onchange="toggleExtraEdit(this, '<?= $inputId ?>', <?= $c['id'] ?>)" <?= $isChecked ?>>
+                                        </div>
+                                        <input type="text" id="<?= $inputId ?>" name="edit_items[<?= $f['field_label'] ?>]" <?= $isDisabled ?> class="form-control <?= $isNumeric?'text-end':'' ?> <?= $roleClass ?>" data-edit-row-id="<?= $c['id'] ?>" onkeyup="<?= $keyupEvent ?>" value="<?= $displayVal ?>" style="text-transform: capitalize;">
+                                    </div>
+                                </div>
+                            <?php else: ?>
+                                <div class="col-md-6">
+                                    <label class="form-label small text-muted mb-0 fw-bold"><?= $f['field_label'] ?></label>
+                                    <input type="text" name="edit_items[<?= $f['field_label'] ?>]" class="form-control form-control-sm <?= $isNumeric?'text-end':'' ?> <?= $roleClass ?>" data-edit-row-id="<?= $c['id'] ?>" onkeyup="<?= $keyupEvent ?>" value="<?= htmlspecialchars($displayVal) ?>" style="text-transform: capitalize;">
+                                </div>
+                            <?php endif; ?>
+
+                        <?php endforeach; ?>
+                    </div>
+                    
+                    <hr>
+                    <div class="row mt-3">
+                        <div class="col-md-6 offset-md-6">
+                            <label class="form-label fw-bold text-end w-100">Total Cost (Rp)</label>
+                            <input type="text" id="edit-total-cost-<?= $c['id'] ?>" name="edit_total_cost" class="form-control fw-bold text-end bg-white border-primary fs-5" onkeyup="formatRupiahEdit(this, <?= $c['id'] ?>)" value="<?= number_format($c['total_cost'], 0, ',', '.') ?>">
+                        </div>
+                    </div>
+
+                  </div>
+                  <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Batal</button>
+                    <button type="submit" name="update_cost" class="btn btn-warning fw-bold"><i class="fas fa-save"></i> Update Perubahan</button>
+                  </div>
+                </div>
+                </form>
+              </div>
+            </div>
             <?php endforeach; ?>
         </tbody>
-        <tfoot class="table-light"><tr><td colspan="2" class="text-end fw-bold">TOTAL (Role: <?= ucfirst($userRole) ?>)</td><td class="text-end fw-bold"><?= formatRupiah($grandTotal) ?></td><td></td></tr></tfoot>
+        <tfoot class="table-light"><tr><td colspan="2" class="text-end fw-bold fs-5">TOTAL PROJECT COST</td><td class="text-end fw-bold fs-4 text-primary"><?= formatRupiah($grandTotal) ?></td><td></td></tr></tfoot>
     </table>
 </div>
 
 <script>
+// ==========================================
+// SCRIPT UNTUK MODAL EDIT
+// ==========================================
+window.formatRupiahEdit = function(element, rowId) {
+    let val = element.value.replace(/[^0-9]/g, '');
+    element.value = val.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+    calculateEditRow(rowId);
+};
+
+window.triggerCalcEdit = function(rowId) {
+    calculateEditRow(rowId);
+}
+
+window.calculateEditRow = function(rowId) {
+    const totalField = document.getElementById(`edit-total-cost-${rowId}`);
+    
+    let multiplierTotal = 1;
+    let hasMultiplier = false;
+    document.querySelectorAll(`.edit-calc-multiplier[data-edit-row-id="${rowId}"]`).forEach(inp => {
+        let val = parseFloat(inp.value.replace(/\./g, '')) || 0;
+        if(val > 0) { multiplierTotal *= val; hasMultiplier = true; }
+    });
+    if(!hasMultiplier) multiplierTotal = 1;
+
+    let priceTotal = 0;
+    document.querySelectorAll(`.edit-calc-price[data-edit-row-id="${rowId}"]`).forEach(inp => {
+        let val = parseFloat(inp.value.replace(/\./g, '')) || 0;
+        priceTotal += val;
+    });
+
+    let extraTotal = 0;
+    document.querySelectorAll(`.edit-calc-extra[data-edit-row-id="${rowId}"]`).forEach(inp => {
+        if(!inp.disabled) { 
+            let val = parseFloat(inp.value.replace(/\./g, '')) || 0;
+            extraTotal += val;
+        }
+    });
+
+    let grandTotal = multiplierTotal * (priceTotal + extraTotal);
+    totalField.value = grandTotal.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+};
+
+window.toggleExtraEdit = function(checkbox, inputId, rowId) {
+    let inputField = document.getElementById(inputId);
+    if(inputField) {
+        inputField.disabled = !checkbox.checked;
+        if(!checkbox.checked) { inputField.value = ''; } 
+        else { inputField.focus(); }
+        calculateEditRow(rowId);
+    }
+};
+
+
+// ==========================================
+// SCRIPT UNTUK ADD NEW (MAIN FORM)
+// ==========================================
 document.addEventListener('DOMContentLoaded', function() {
     const groupSelect = document.getElementById('group_select');
     const container = document.getElementById('dynamic_table_container');
@@ -167,26 +362,20 @@ document.addEventListener('DOMContentLoaded', function() {
         const checkbox = document.getElementById(`check-${paramId}`);
         const totalField = document.getElementById(`total-cost-${paramId}`);
         
-        // Multiplier
         let multiplierTotal = 1;
-        const multipliers = document.querySelectorAll(`.calc-multiplier[data-row-id="${paramId}"]`);
-        multipliers.forEach(inp => {
+        document.querySelectorAll(`.calc-multiplier[data-row-id="${paramId}"]`).forEach(inp => {
             let val = parseFloat(inp.value.replace(/\./g, '')) || 0;
             if(val > 0) multiplierTotal *= val;
         });
 
-        // Price
         let priceTotal = 0;
-        const prices = document.querySelectorAll(`.calc-price[data-row-id="${paramId}"]`);
-        prices.forEach(inp => {
+        document.querySelectorAll(`.calc-price[data-row-id="${paramId}"]`).forEach(inp => {
             let val = parseFloat(inp.value.replace(/\./g, '')) || 0;
             priceTotal += val;
         });
 
-        // Extra
         let extraTotal = 0;
-        const extras = document.querySelectorAll(`.calc-extra[data-row-id="${paramId}"]`);
-        extras.forEach(inp => {
+        document.querySelectorAll(`.calc-extra[data-row-id="${paramId}"]`).forEach(inp => {
             let extraCheck = document.getElementById(`enable-${inp.name}`); 
             if(extraCheck && extraCheck.checked) {
                 let val = parseFloat(inp.value.replace(/\./g, '')) || 0;
@@ -225,10 +414,10 @@ document.addEventListener('DOMContentLoaded', function() {
             <table class="table table-hover border align-middle">
                 <thead class="table-secondary">
                 <tr>
-                    <th width="40"><i class="fas fa-check"></i></th>
+                    <th width="40" class="text-center"><i class="fas fa-check"></i></th>
                     <th width="20%">Parameter</th>
                     <th>Input Detail</th>
-                    <th width="250">Total (IDR)</th> 
+                    <th width="200">Total (Rp)</th> 
                 </tr>
                 </thead>
                 <tbody>`;
@@ -258,14 +447,14 @@ document.addEventListener('DOMContentLoaded', function() {
                                 <label class="form-label small fw-bold text-info mb-0">${f.field_label}</label>
                                 <div class="input-group input-group-sm">
                                     <div class="input-group-text"><input class="form-check-input mt-0" type="checkbox" id="enable-${inputName}" onchange="toggleExtra(this, '${inputName}', ${p.id})"></div>
-                                    <input type="text" name="${inputName}" disabled class="form-control ${isNumeric ? 'text-end' : ''} ${roleClass}" data-row-id="${p.id}" onkeyup="${keyupEvent}" placeholder="${isNumeric ? '0' : 'Text...'}">
+                                    <input type="text" name="${inputName}" disabled class="form-control ${isNumeric ? 'text-end' : ''} ${roleClass}" data-row-id="${p.id}" onkeyup="${keyupEvent}" placeholder="${isNumeric ? '0' : 'Text...'}" style="text-transform: capitalize;">
                                 </div>
                             </div>`;
                         } else {
                             html += `
                             <div class="col-md-6">
                                 <label class="form-label small text-muted mb-0">${f.field_label}</label>
-                                <input type="text" name="items[${p.id}][${f.field_label}]" class="form-control form-control-sm ${isNumeric ? 'text-end' : ''} ${roleClass}" data-row-id="${p.id}" onkeyup="${keyupEvent}" placeholder="${isNumeric ? '0' : 'Text...'}">
+                                <input type="text" name="items[${p.id}][${f.field_label}]" class="form-control form-control-sm ${isNumeric ? 'text-end' : ''} ${roleClass}" data-row-id="${p.id}" onkeyup="${keyupEvent}" placeholder="${isNumeric ? '0' : 'Text...'}" style="text-transform: capitalize;">
                             </div>`;
                         }
                     });
@@ -275,10 +464,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     <td>
                         <div class="input-group">
                             <span class="input-group-text small fw-bold">Rp</span>
-                            <input type="text" id="total-cost-${p.id}" name="total_costs[${p.id}]" 
-                                   class="form-control fw-bold text-end bg-light" 
-                                   style="font-size: 1.1rem; min-width: 150px;" 
-                                   onkeyup="formatRupiahInput(this)" placeholder="0">
+                            <input type="text" id="total-cost-${p.id}" name="total_costs[${p.id}]" class="form-control fw-bold text-end bg-light" style="font-size: 1rem; min-width: 130px;" onkeyup="formatRupiahInput(this)" placeholder="0">
                         </div>
                     </td></tr>`;
             });
